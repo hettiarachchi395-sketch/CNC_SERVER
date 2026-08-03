@@ -105,7 +105,7 @@ app.post('/api/upload-image', upload.single('file'), (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// 4. Flutter App Control Commands Endpoint (Start, Stop, Pause)
+// 4. Flutter App Control Commands Endpoint (Start, Stop, Pause, Home)
 app.post('/api/plotter/command', (req, res) => {
     const { command } = req.body;
     if (!command) {
@@ -115,12 +115,21 @@ app.post('/api/plotter/command', (req, res) => {
     currentCommand = command;
     commandId++;
 
+    // 🏠 'home' command එකක් ආවොත්, Return to Zero සඳහා G-code file එක auto generate කරගැනීම
+    if (command === 'home') {
+        const homeGCode = "G90\nM3 S0 ; Pen UP\nG0 X0 Y0 Z0 ; Move to Origin\n";
+        fs.writeFileSync(path.join(__dirname, 'plot.gcode'), homeGCode);
+        fileVersion++;
+        console.log(`[SERVER] Home command received. Created Return To Zero G-code (fileVersion: ${fileVersion})`);
+    }
+
     console.log(`[SERVER] New Command Received: ${command} (ID: ${commandId})`);
 
     res.json({
         message: `Command '${command}' received successfully`,
         command: currentCommand,
-        command_id: commandId
+        command_id: commandId,
+        file_version: fileVersion
     });
 });
 
@@ -147,6 +156,6 @@ app.get('/api/plotter/download-gcode', (req, res) => {
 
 // ---------------------------------------------------------------------
 // Server Start
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server is running on port ${PORT}`);
 });
