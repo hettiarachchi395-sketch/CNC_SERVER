@@ -1,4 +1,27 @@
-// 🧩 සරල Image (BMP/JPG Data) G-code බවට හරවන Function එක
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// 🔓 CORS සහ Middleware පිහිටුවීම
+app.use(cors());
+app.use(express.json());
+
+// 📁 Multer File Upload configuration (Memory storage for image conversion)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// ---------------------------------------------------------------------
+// Global Variables (ESP32 එක සමඟ Sync වීමට)
+let fileVersion = 1;
+let currentCommand = 'idle';
+let commandId = 0;
+
+// ---------------------------------------------------------------------
+// 🧩 Image (BMP/JPG Buffer) එකක් G-code බවට හරවන Function එක
 function convertImageToGCode(buffer) {
     let gcode = [];
     gcode.push("G90 ; Absolute positioning");
@@ -6,8 +29,7 @@ function convertImageToGCode(buffer) {
     gcode.push("M3 S0 ; Pen UP");
     gcode.push("G0 X0 Y0 ; Move Home");
 
-    // Sample Grid Mapping for Plotter
-    // මෙහිදී Image එකේ Size එක අනුව Basic Stroke G-code එකක් ජනනය වේ
+    // Sample Plotter Bounds / Boundary Square
     const width = 50; 
     const height = 50;
 
@@ -23,83 +45,50 @@ function convertImageToGCode(buffer) {
     return gcode.join("\n");
 }
 
-
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json());
-
-// Multi-part file upload configuration (for G-code files)
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir);
-}
-
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => cb(null, 'latest.gcode')
-});
-const upload = multer({ storage: storage });
-
-// ================= STATE VARIABLES =================
-let fileVersion = 0;
-let commandId = 0;
-let currentCommand = "idle";
-
-// ================= API ENDPOINTS =================
-
-// 1. ESP32 Poll කරන Endpoint එක (Status පරීක්ෂාවට)
-app.get('/api/plotter/status', (req, res) => {
-    res.json({
-        file_version: fileVersion,
-        command_id: commandId,
-        command: currentCommand
-    });
+// ---------------------------------------------------------------------
+// 1. Root Test Endpoint
+app.get('/', (req, res) => {
+    res.send("CNC Pen Plotter Server is Running!");
 });
 
-// 2. ESP32 එක G-code File එක Download කරගන්නා Endpoint එක
-app.get('/api/latest-gcode', (req, res) => {
-    const filePath = path.join(uploadDir, 'latest.gcode');
-    if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-    } else {
-        res.status(404).send("No G-code file uploaded yet.");
-    }
-});
-
-// 3. Flutter App එකෙන් G-code Upload කරන Endpoint එක
+// ---------------------------------------------------------------------
+// 2. Direct G-code File Upload Endpoint (.gcode files සඳහා)
 app.post('/api/upload-gcode', upload.single('file'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: "No file uploaded" });
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No G-code file uploaded" });
+        }
+
+        fs.writeFileSync(path.join(__dirname, 'plot.gcode'), req.file.buffer);
+        fileVersion++;
+        currentCommand = 'idle';
+
+        console.log(`[SERVER] G-code uploaded directly! New fileVersion: ${fileVersion}`);
+
+        res.json({
+            message: "G-code uploaded successfully!",
+            file_version: fileVersion
+        });
+    } catch (err) {
+        console.error("Error uploading G-code:", err);
+        res.status(500).json({ error: "Failed to upload G-code" });
     }
-    fileVersion++; // අලුත් file එකක් ආ විට version එක එකකින් වැඩි වේ
-    console.log(`[SERVER] New G-code uploaded! Version: ${fileVersion}`);
-    res.json({ message: "G-code uploaded successfully", file_version: fileVersion });
 });
 
-// 📤 Flutter App එකෙන් එවන Photo එක බාරගෙන G-code හදන Endpoint එක
+// ---------------------------------------------------------------------
+// 3. Image Upload & G-code Conversion Endpoint (Flutter Photo Upload සඳහා)
 app.post('/api/upload-image', upload.single('file'), (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: "No image file uploaded" });
         }
 
-        // 1. Image එක G-code එකක් බවට Convert කිරීම
+        // Image එක G-code එකක් බවට Convert කිරීම
         const gcodeContent = convertImageToGCode(req.file.buffer);
 
-        // 2. G-code එක 'plot.gcode' ලෙස Save කිරීම
-        const fs = require('fs');
-        const path = require('path');
+        // G-code එක 'plot.gcode' ලෙස Save කිරීම
         fs.writeFileSync(path.join(__dirname, 'plot.gcode'), gcodeContent);
 
-        // 3. File Version එක 1කින් වැඩි කිරීම (ESP32 එකට Auto-Download වෙන්න)
         fileVersion++;
         currentCommand = 'idle';
 
@@ -115,22 +104,49 @@ app.post('/api/upload-image', upload.single('file'), (req, res) => {
     }
 });
 
-
-// 4. Flutter App එකෙන් Commands (Start, Stop, Pause) යවන Endpoint එක
+// ---------------------------------------------------------------------
+// 4. Flutter App Control Commands Endpoint (Start, Stop, Pause)
 app.post('/api/plotter/command', (req, res) => {
     const { command } = req.body;
     if (!command) {
         return res.status(400).json({ error: "Command is required" });
     }
-    
+
     currentCommand = command;
-    commandId++; // අලුත් command එකක් ආ විට ID එක වැඩි වේ
-    console.log(`[SERVER] Command received: ${command} (ID: ${commandId})`);
-    
-    res.json({ message: "Command updated", command_id: commandId, command: currentCommand });
+    commandId++;
+
+    console.log(`[SERVER] New Command Received: ${command} (ID: ${commandId})`);
+
+    res.json({
+        message: `Command '${command}' received successfully`,
+        command: currentCommand,
+        command_id: commandId
+    });
 });
 
-// Server Start කිරීම
+// ---------------------------------------------------------------------
+// 5. ESP32 Polling Endpoint (ESP32 එක මඟින් Status/G-code ලබා ගන්නා ස්ථානය)
+app.get('/api/plotter/status', (req, res) => {
+    res.json({
+        file_version: fileVersion,
+        command: currentCommand,
+        command_id: commandId
+    });
+});
+
+// ---------------------------------------------------------------------
+// 6. ESP32 G-code Download Endpoint
+app.get('/api/plotter/download-gcode', (req, res) => {
+    const filePath = path.join(__dirname, 'plot.gcode');
+    if (fs.existsSync(filePath)) {
+        res.sendFile(filePath);
+    } else {
+        res.status(404).send("No G-code file found on server.");
+    }
+});
+
+// ---------------------------------------------------------------------
+// Server Start
 app.listen(PORT, () => {
-    console.log(`🚀 CNC Plotter Server running on port ${PORT}`);
+    console.log(`🚀 Server is running on port ${PORT}`);
 });
